@@ -56,14 +56,20 @@ cd AboutYou
 * 確保伺服器已開啟 MySQL 擴充功能（`pdo_mysql` 或 `mysqli`）。
 * 設定資料庫連接設定檔（如有）。
 * 網站架構:
+```text
   AboutYou
-   |-images
-     |-aboutyou.png
-     |-default_avatar.png
-   |-uploads
-     |-avatars
-     |-capsule_profile
-     |-memories
+   ├── images
+         ├── aboutyou.png
+         └── default_avatar.png
+   └── uploads
+         ├── avatars
+         ├── capsule_profile
+         └── memories
+```
+* 預設用戶頭像: default_avatar.png
+* PWA 頭像: **(android 的圖像按需要參改 manifest.json)
+  - Iphone: apple-touch-icon.png 
+  - Android: android_144x144.png; android_180x180.png; android_192x192.png
 
 ---
 
