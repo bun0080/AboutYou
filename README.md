@@ -88,23 +88,23 @@ INSERT INTO `tbl_user` (`id`, `username`, `nickname`, `icon_url`, `relationship`
 
 ---
 
-## 📲 PWA 行動端安裝教學 (How to Install App)
+### 4. 📲 PWA 行動端安裝教學 (How to Install App)
 
 由於本網站支援 PWA 技術，你與家人無需透過 App Store 或 Google Play，即可一鍵安裝至手機：
 
-### iOS (iPhone / iPad)
+#### iOS (iPhone / iPad)
 1. 使用 **Safari 瀏覽器** 開啟本網站。
 2. 點擊瀏覽器底部的 **「分享」** 按鈕（向上箭頭圖示）。
 3. 往下滑動並選擇 **「加入主畫面」**。
 
-### Android (安卓手機)
+#### Android (安卓手機)
 1. 使用 **Chrome 瀏覽器** 開啟本網站。
 2. 系統會自動彈出「將 AboutYou 新增至主畫面」提示；若無彈出，請點擊右上角 **「┇」選單**。
 3. 點擊 **「安裝應用程式」** 或 **「加到主畫面」**。
 
 ---
 
-###使用建議
+## 使用建議
 1. SQL創建user
 2. 使用/ay_login.pgp登錄
 3. 點擊[📱 裝置] 新增移動設備. 減少頻繁的使用登錄信息(account+password)登錄
