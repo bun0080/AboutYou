@@ -1,9 +1,88 @@
-# AboutYou
+# AboutYou 👶📸
 
-## Description
-- For you to build your own website to store your baby photos.
-- Manage with simple way.
-- Website use more flexible to manage.
-- Phone use more user-friendly with web app.
+**AboutYou** 是一個專為紀錄與保存寶寶成長點滴而設計的個人相簿網站系統。
+本專案採用 **PHP** 後端架構，並深度整合 **PWA (Progressive Web App)** 技術，讓你可以像管理一般網頁一樣靈活自訂，同時又能讓家人在手機上獲得如同原生 App 的流暢體驗。
 
-## Remarks
+---
+
+## 🌟 核心特色 (Features)
+
+* **專屬相簿**：輕鬆打造個人網站，安全儲存並展示寶寶的珍貴照片。
+* **輕鬆管理**：操作介面直觀，用最簡單的方式進行檔案與資料管理。
+* **靈活擴充**：架構設計靈含，基於 PHP 輕鬆進行二次開發。
+* **📱 支援 PWA**：
+  * 可直接將網頁**安裝至手機桌面**，生成獨立 App 圖示。
+  * 支援全螢幕啟動，隱藏瀏覽器網址列，體驗更純粹。
+  * 具備快取機制，大幅提升手機端載入速度。
+
+---
+
+## 📂 專案架構 (Project Structure)
+
+```text
+AboutYou/
+├── Database/
+│   └── mysql/          # 數據庫初始化與 SQL 腳本
+├── aboutyou/           # 網頁應用程式核心原始碼 (PHP、HTML、CSS、JS、Manifest 等)
+├── LICENSE             # Apache-2.0 開源授權協議
+├── README.md           # 專案說明文件
+└── folder_structure.txt# 詳細資料夾結構說明
+```
+
+---
+
+## 🛠️ 技術棧 (Tech Stack)
+
+* **Frontend**: HTML5, CSS3, JavaScript (整合 Service Worker & Manifest)
+* **Backend**: PHP
+* **Database**: MySQL
+
+---
+
+## 🚀 快速開始 (Getting Started)
+
+### 1. 複製專案 (Clone Repository)
+```bash
+git clone https://github.com
+cd AboutYou
+```
+
+### 2. 資料庫設定 (Database Setup)
+* 進入 `Database/mysql/` 資料夾。
+* 將內部的 SQL 腳本匯入至你的 MySQL 資料庫中。
+
+### 3. 環境配置與啟動 (Deployment)
+* 將 `aboutyou/` 資料夾內的完整原始碼部署至你的 PHP 伺服器環境（如 Apache、Nginx，或使用 XAMPP / Laragon 進行本地測試）。
+* 確保伺服器已開啟 MySQL 擴充功能（`pdo_mysql` 或 `mysqli`）。
+* 設定資料庫連接設定檔（如有）。
+* 網站架構:
+  AboutYou
+   |-images
+     |-aboutyou.png
+     |-default_avatar.png
+   |-uploads
+     |-avatars
+     |-capsule_profile
+     |-memories
+
+---
+
+## 📲 PWA 行動端安裝教學 (How to Install App)
+
+由於本網站支援 PWA 技術，你與家人無需透過 App Store 或 Google Play，即可一鍵安裝至手機：
+
+### iOS (iPhone / iPad)
+1. 使用 **Safari 瀏覽器** 開啟本網站。
+2. 點擊瀏覽器底部的 **「分享」** 按鈕（向上箭頭圖示）。
+3. 往下滑動並選擇 **「加入主畫面」**。
+
+### Android (安卓手機)
+1. 使用 **Chrome 瀏覽器** 開啟本網站。
+2. 系統會自動彈出「將 AboutYou 新增至主畫面」提示；若無彈出，請點擊右上角 **「┇」選單**。
+3. 點擊 **「安裝應用程式」** 或 **「加到主畫面」**。
+
+---
+
+## 📄 開源協議 (License)
+
+本專案採用 **[Apache-2.0 License](LICENSE)** 開源協議。你可以自由地使用、修改和分發本專案。
