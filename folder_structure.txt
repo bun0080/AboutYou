@@ -1,8 +1,0 @@
-AboutYou
- |-images
-   |-aboutyou.png
-   |-default_avatar.png
- |-uploads
-   |-avatars
-   |-capsule_profile
-   |-memories
