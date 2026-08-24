@@ -1,0 +1,23 @@
+{
+  "name": "Baby - 回憶時光機",
+  "short_name": "Baby - 回憶時光機",
+  "icons": [
+    {
+      "src": "/android_192x192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/android_180x180.png",
+      "sizes": "180x180",
+      "type": "image/png"
+    },
+    {
+      "src": "/android_144x144.png",
+      "sizes": "144x144",
+      "type": "image/png"
+    }
+  ],
+  "start_url": "/aboutyou.php",
+  "display": "standalone"
+}
