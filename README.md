@@ -53,11 +53,20 @@ cd AboutYou
 
 ### 3. 環境配置與啟動 (Deployment)
 * 將 `aboutyou/` 資料夾內的完整原始碼部署至你的 PHP 伺服器環境（如 Apache、Nginx，或使用 XAMPP / Laragon 進行本地測試）。
+* */apache2/php.ini 的部份配置, 有需要自行修改:
+- max_execution_time = 150
+- max_input_time = 150
+- memory_limit = 512M
+- post_max_size = 300M
+- upload_max_filesize = 300M
+- max_file_uploads = 50
 * 確保伺服器已開啟 MySQL 擴充功能（`pdo_mysql` 或 `mysqli`）。
-* 設定資料庫連接設定檔（如有）。
+* 設定資料庫連接設定檔:   Config.php
 * 網站架構:
 ```text
   AboutYou
+   ├── *.php
+   ├── manifest.json
    ├── images
          ├── aboutyou.png
          └── default_avatar.png
@@ -67,7 +76,7 @@ cd AboutYou
          └── memories
 ```
 * 預設用戶頭像: default_avatar.png
-* PWA 頭像: **(android 的圖像按需要參改 manifest.json)
+* PWA 頭像: **需要自行叉圖,命名, 添加** (android 的圖像按需要參改 manifest.json)
   - Iphone: apple-touch-icon.png 
   - Android: android_144x144.png; android_180x180.png; android_192x192.png
 
