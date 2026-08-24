@@ -25,8 +25,7 @@ AboutYou/
 │   └── mysql/          # 數據庫初始化與 SQL 腳本
 ├── aboutyou/           # 網頁應用程式核心原始碼 (PHP、HTML、CSS、JS、Manifest 等)
 ├── LICENSE             # Apache-2.0 開源授權協議
-├── README.md           # 專案說明文件
-└── folder_structure.txt# 詳細資料夾結構說明
+└── README.md           # 專案說明文件
 ```
 
 ---
@@ -50,16 +49,23 @@ cd AboutYou
 ### 2. 資料庫設定 (Database Setup)
 * 進入 `Database/mysql/` 資料夾。
 * 將內部的 SQL 腳本匯入至你的 MySQL 資料庫中。
+* SQL創建user:
+```text
+SET NAMES utf8mb4;
+
+INSERT INTO `tbl_user` (`id`, `username`, `nickname`, `icon_url`, `relationship`, `password`, `created_at`, `approval`, `aboutyou_default_capsule`) VALUES
+(1,	'root',	'Nick.Name',	'generate after upload avatar image',	NULL,	'123456',	'2026-08-24 00:00:00',	'Y',	1);
+```
 
 ### 3. 環境配置與啟動 (Deployment)
 * 將 `aboutyou/` 資料夾內的完整原始碼部署至你的 PHP 伺服器環境（如 Apache、Nginx，或使用 XAMPP / Laragon 進行本地測試）。
 * */apache2/php.ini 的部份配置, 有需要自行修改:
-- max_execution_time = 150
-- max_input_time = 150
-- memory_limit = 512M
-- post_max_size = 300M
-- upload_max_filesize = 300M
-- max_file_uploads = 50
+ - max_execution_time = 150
+ - max_input_time = 150
+ - memory_limit = 512M
+ - post_max_size = 300M
+ - upload_max_filesize = 300M
+ - max_file_uploads = 50
 * 確保伺服器已開啟 MySQL 擴充功能（`pdo_mysql` 或 `mysqli`）。
 * 設定資料庫連接設定檔:   Config.php
 * 網站架構:
@@ -73,7 +79,7 @@ cd AboutYou
    └── uploads
          ├── avatars
          ├── capsule_profile
-         └── memories
+         └── memories                <<上傳的圖片所在, 請做備份.
 ```
 * 預設用戶頭像: default_avatar.png
 * PWA 頭像: **需要自行叉圖,命名, 添加** (android 的圖像按需要參改 manifest.json)
@@ -97,6 +103,21 @@ cd AboutYou
 3. 點擊 **「安裝應用程式」** 或 **「加到主畫面」**。
 
 ---
+
+###使用建議
+1. SQL創建user
+2. 使用/ay_login.pgp登錄
+3. 點擊[📱 裝置] 新增移動設備. 減少頻繁的使用登錄信息(account+password)登錄
+4. PWA 安裝
+5. 開始使用
+ - 點擊[✏️ 個人資料] 編輯: Nickname + 頭像上傳, 保存後返回
+ - 點擊[＋ 新增] 創建Capsule, 輸入寶寶相關資料, 以及頭像, 創建
+ - (optional) 點擊[設為預設]讓寶寶作為常駐, 進入即看
+6. 第一次
+ - 在"寫下這段回憶..."填寫回憶
+ - 點擊"點這裡選擇照片或影片" 上傳框選擇需要的行為, 照片或影片
+ - 查看/勾選"可觀看的使用者", 為部份寶寶的私密照片不被四大長老看到
+ - 點擊"📤 發佈", 記錄寶寶的第一次
 
 ## 📄 開源協議 (License)
 
