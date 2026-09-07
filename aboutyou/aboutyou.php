@@ -58,7 +58,7 @@ if (!$is_session_login) {
 }
 
 if (!$is_session_login && !$is_device_login) {
-    header("Location: login.php");
+    header("Location: ay_login.php");
     exit;
 }
 
