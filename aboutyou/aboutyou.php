@@ -58,7 +58,7 @@ if (!$is_session_login) {
 }
 
 if (!$is_session_login && !$is_device_login) {
-    header("Location: login.php");
+    header("Location: ay_login.php");
     exit;
 }
 
@@ -123,7 +123,8 @@ if (isset($_GET['ajax_action']) && $_GET['ajax_action'] === 'trajectory') {
         $month = intval($_GET['month']);
         $start_date = "$year-$month-01";
         $end_date = date('Y-m-d', strtotime('+1 month', strtotime($start_date)));
-        // 優化SQL：GROUP BY capture_date 取MIN媒體圖，對應需求
+
+        // 1. 获取有回忆的日期（现有逻辑）
         $sql = "SELECT 
                 m.capture_date,
                 COUNT(*) as cnt,
@@ -131,11 +132,11 @@ if (isset($_GET['ajax_action']) && $_GET['ajax_action'] === 'trajectory') {
                 MAX(m.type) as first_type
                 FROM tbl_memories m
                 WHERE m.capsule_id = ?
-                  AND m.capture_date >= ? AND m.capture_date < ?
-                  AND (m.user_id = ? OR EXISTS (
-                  SELECT 1 FROM tbl_memory_shared s 
-                  WHERE s.memory_id = m.id AND FIND_IN_SET(?, s.target_user_ids) > 0
-                  ))
+                AND m.capture_date >= ? AND m.capture_date < ?
+                AND (m.user_id = ? OR EXISTS (
+                SELECT 1 FROM tbl_memory_shared s 
+                WHERE s.memory_id = m.id AND FIND_IN_SET(?, s.target_user_ids) > 0
+                ))
                 GROUP BY m.capture_date";
         $stmt = mysqli_prepare($link, $sql);
         mysqli_stmt_bind_param($stmt, "issii", $capsule_id, $start_date, $end_date, $user_id, $user_id);
@@ -150,6 +151,26 @@ if (isset($_GET['ajax_action']) && $_GET['ajax_action'] === 'trajectory') {
             ];
         }
         mysqli_stmt_close($stmt);
+
+        // ★ 2. 新增：查询该月有里程碑的日期
+        $ms_sql = "SELECT DISTINCT DATE(milestone_date) as ms_date
+                FROM tbl_milestones
+                WHERE capsule_id = ? AND milestone_date >= ? AND milestone_date < ?";
+        $ms_stmt = mysqli_prepare($link, $ms_sql);
+        mysqli_stmt_bind_param($ms_stmt, "iss", $capsule_id, $start_date, $end_date);
+        mysqli_stmt_execute($ms_stmt);
+        $ms_result = mysqli_stmt_get_result($ms_stmt);
+        while ($ms_row = mysqli_fetch_assoc($ms_result)) {
+            $date = $ms_row['ms_date'];
+            if (!isset($data[$date])) {
+                // 该日期没有回忆，但要有数据才能让前端渲染黄色背景
+                $data[$date] = ['count' => 0, 'first_media' => null, 'first_type' => null];
+            }
+            // 标记有里程碑
+            $data[$date]['has_milestone'] = true;
+        }
+        mysqli_stmt_close($ms_stmt);
+
         echo json_encode(['success' => true, 'data' => $data]);
         exit;
     }
@@ -1024,6 +1045,11 @@ mysqli_close($link);
     color: var(--text-light);
     grid-column: 1 / -1;
 }
+.cal-day.has-milestone .day-number {
+    background: #ffd700; /* 金色 */
+    color: #333;         /* 深色文字保持可读 */
+    box-shadow: 0 1px 4px rgba(0,0,0,0.15);
+}
     </style>
 </head>
 <body>
@@ -1433,26 +1459,35 @@ function appendEmojiToComment(inputId, emoji) {
             // 有回憶則顯示縮圖與數量
             if (calendarData[dateStr]) {
                 const data = calendarData[dateStr];
-                dayBox.classList.add('has-memory');
-                if (data.first_media) {
-                    const url = data.first_media;
-                    // 判斷是否為影片 (根據後端 type 或副檔名)
-                    const isVideo = (data.first_type === 'video') || /\.(mp4|webm|mov|avi|mkv)$/i.test(url);
-                    
-                    // 若為影片且沒有生成 jpg 縮圖，使用 <video> 標籤展示截圖
-                    if (isVideo && !/\.(jpg|jpeg|png|webp|gif|heic)$/i.test(url)) {
-                        const video = document.createElement('video');
-                        video.className = 'day-thumb';
-                        video.src = url;
-                        video.muted = true;
-                        video.preload = 'metadata'; // 載入首幀畫面
-                        video.addEventListener('loadeddata', () => { video.currentTime = 0.5; }); // 自動定格在第 0.5 秒
-                        dayBox.appendChild(video);
-                    } else {
-                        const img = new Image();
-                        img.className = 'day-thumb';
-                        img.src = url;
-                        dayBox.appendChild(img);
+                if (data) {
+                    // ★ 标记是否有里程碑
+                    if (data.has_milestone) {
+                        dayBox.classList.add('has-milestone');
+                    }
+                    // 如果有回忆（count > 0）
+                    if (data.count && data.count > 0) {
+                        dayBox.classList.add('has-memory');
+                        if (data.first_media) {
+                            const url = data.first_media;
+                            // 判斷是否為影片 (根據後端 type 或副檔名)
+                            const isVideo = (data.first_type === 'video') || /\.(mp4|webm|mov|avi|mkv)$/i.test(url);
+                            
+                            // 若為影片且沒有生成 jpg 縮圖，使用 <video> 標籤展示截圖
+                            if (isVideo && !/\.(jpg|jpeg|png|webp|gif|heic)$/i.test(url)) {
+                                const video = document.createElement('video');
+                                video.className = 'day-thumb';
+                                video.src = url;
+                                video.muted = true;
+                                video.preload = 'metadata'; // 載入首幀畫面
+                                video.addEventListener('loadeddata', () => { video.currentTime = 0.5; }); // 自動定格在第 0.5 秒
+                                dayBox.appendChild(video);
+                            } else {
+                                const img = new Image();
+                                img.className = 'day-thumb';
+                                img.src = url;
+                                dayBox.appendChild(img);
+                            }
+                        }
                     }
                 }
                 const countBadge = document.createElement('span');
@@ -1838,16 +1873,30 @@ function editMilestone(id, btn) {
         try {
             const res = await fetch(`aboutyou.php?capsule_id=${capsuleId}&ajax_load=1&offset=${offset}&limit=${limit}`);
             const data = await res.json();
-            // 插入HTML
-            wrapperDom.insertAdjacentHTML('beforeend', data.html);
+            // 使用 DOMParser 解析返回的 HTML 片段
+            const parser = new DOMParser();
+            const doc = parser.parseFromString(data.html, 'text/html');
+            // 执行所有 <script> 标签内的代码（定义 mediaData_xxx 变量）
+            const scripts = doc.querySelectorAll('script');
+            scripts.forEach(script => {
+                if (script.textContent.trim()) {
+                    try {
+                        eval(script.textContent);
+                    } catch (e) {
+                        console.error('执行脚本失败:', e);
+                    }
+                }
+            });
+            // 获取不含 <script> 的 body 内容并插入页面
+            const bodyContent = doc.body.innerHTML;
+            wrapperDom.insertAdjacentHTML('beforeend', bodyContent);
             offset += limit;
             hasMore = data.has_more;
-            // 無更多內容顯示底線
             if (!hasMore) {
                 endDom.style.display = 'block';
             }
         } catch (err) {
-            console.error('滾動載入異常：', err);
+            console.error('滚动加载异常:', err);
         } finally {
             loadingDom.style.display = 'none';
             isLoading = false;
