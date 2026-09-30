@@ -16,6 +16,61 @@ ini_set('log_errors', 1);
 error_reporting(E_ALL);
 
 // ============================================================
+// ★ STEP 1.5: 偵測 POST 被 post_max_size 丟棄的情形（關鍵修復）
+// ============================================================
+function th_return_bytes($val) {
+    $val = trim($val);
+    if ($val === '') return 0;
+    $last = strtolower($val[strlen($val) - 1]);
+    $val = intval($val);
+    switch ($last) {
+        case 'g': $val *= 1024; // no break
+        case 'm': $val *= 1024; // no break
+        case 'k': $val *= 1024;
+    }
+    return $val;
+}
+
+if ($_SERVER["REQUEST_METHOD"] === "POST") {
+    $content_length = isset($_SERVER['CONTENT_LENGTH']) ? intval($_SERVER['CONTENT_LENGTH']) : 0;
+    $post_max_bytes = th_return_bytes(ini_get('post_max_size'));
+    $upload_max_bytes = th_return_bytes(ini_get('upload_max_filesize'));
+
+    // 情境 A：POST body 超過 post_max_size → $_POST 與 $_FILES 均為空
+    $looks_like_dropped_post = ($content_length > 0
+        && empty($_POST)
+        && empty($_FILES)
+        && !isset($_POST['action_delete_memory'])
+        && !isset($_POST['action_edit_memory_text'])
+        && !isset($_POST['action_delete_comment'])
+        && !isset($_POST['action_edit_comment'])
+        && !isset($_POST['set_default_capsule']));
+
+    if ($looks_like_dropped_post) {
+        $msg = sprintf(
+            '上傳失敗：本次請求大小約 %.1f MB，但伺服器 post_max_size = %s、upload_max_filesize = %s。' .
+            '請減少檔案數量或壓縮後重試，或請管理員調高 php.ini 限制。',
+            $content_length / 1048576,
+            ini_get('post_max_size'),
+            ini_get('upload_max_filesize')
+        );
+        $_SESSION['upload_error'] = $msg;
+	// ★ 新增：AJAX 請求直接回 JSON，避免 fetch 拿到 HTML
+	    if (isset($_SERVER['HTTP_X_REQUESTED_WITH'])
+	        && strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) === 'xmlhttprequest') {
+	        header('Content-Type: application/json; charset=utf-8');
+	        echo json_encode(['success' => false, 'error' => $msg], JSON_UNESCAPED_UNICODE);
+	        exit;
+	    }
+        $back = 'aboutyou.php';
+        if (isset($_GET['capsule_id'])) $back .= '?capsule_id=' . intval($_GET['capsule_id']);
+        header("Location: $back");
+        exit;
+    }
+}
+
+
+// ============================================================
 // ★ STEP 2: Session 與登入檢測
 // ============================================================
 if (session_status() === PHP_SESSION_NONE) session_start();
@@ -58,7 +113,7 @@ if (!$is_session_login) {
 }
 
 if (!$is_session_login && !$is_device_login) {
-    header("Location: ay_login.php");
+    header("Location: login.php");
     exit;
 }
 
@@ -313,7 +368,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST["action_post_memory"]))
     $shared_users = array_filter($shared_users, 'is_numeric');
     $shared_users = array_map('intval', $shared_users);
     if (!in_array($user_id, $shared_users)) $shared_users[] = $user_id;
-    $shared_users = array_unique($shared_users);
+    $shared_users = array_unique(array_map('intval', $shared_users));
     sort($shared_users);
     $shared_user_ids_str = implode(',', $shared_users);
 
@@ -338,9 +393,30 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST["action_post_memory"]))
                 'size' => $_FILES['media']['size'][$i],
             ];
         }
-        foreach ($uploaded_files as $file) {
-            if ($file['error'] !== UPLOAD_ERR_OK) continue;
-            if (!file_exists($file['tmp_name'])) continue;
+       $upload_err_map = [
+	    UPLOAD_ERR_INI_SIZE   => '超過 upload_max_filesize (' . ini_get('upload_max_filesize') . ')',
+	    UPLOAD_ERR_FORM_SIZE  => '超過表單 MAX_FILE_SIZE',
+	    UPLOAD_ERR_PARTIAL    => '只上傳了一部分',
+	    UPLOAD_ERR_NO_FILE    => '沒有檔案',
+	    UPLOAD_ERR_NO_TMP_DIR => '缺少臨時目錄',
+	    UPLOAD_ERR_CANT_WRITE => '寫入磁碟失敗',
+	    UPLOAD_ERR_EXTENSION  => '被 PHP 擴充中止',
+	];
+
+       foreach ($uploaded_files as $file) {
+            if ($file['error'] !== UPLOAD_ERR_OK) {
+	        $reason = $upload_err_map[$file['error']] ?? ('錯誤碼 ' . $file['error']);
+	        error_log("[aboutyou] Upload failed: {$file['name']} -> $reason");
+	        // 累積到 session，最後再一次性顯示
+	        if (!isset($_SESSION['upload_error'])) {
+	            $_SESSION['upload_error'] = "檔案「{$file['name']}」上傳失敗：$reason";
+	        }
+	        continue;
+	    }
+            if (!file_exists($file['tmp_name'])) {
+	        error_log("[aboutyou] tmp file missing: {$file['tmp_name']}");
+	        continue;
+	    }
 
             $file_ext = strtolower(pathinfo($file['name'], PATHINFO_EXTENSION));
             if (empty($file_ext) || strlen($file_ext) > 10) {
@@ -368,7 +444,14 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST["action_post_memory"]))
                 $type = "photo";
                 $tn = uniqid("thumb_") . ".jpg";
                 if (createThumbnail($final_path, $upload_dir . $tn)) $thumbnail_url = $upload_dir . $tn;
-            } elseif (isVideoFile($new_file_name)) { $type = "video"; }
+            } elseif (isVideoFile($new_file_name)) {
+	        $type = "video";
+	        // ★ 新增：用 ffmpeg 抽 JPEG 縮圖
+	        $vt = uniqid("vthumb_") . ".jpg";
+	        if (createVideoThumbnail($final_path, $upload_dir . $vt, 0.5, 400)) {
+	            $thumbnail_url = $upload_dir . $vt;
+	        }
+	    }
 
             $current_text = !$text_saved ? $content_text : "";
             $sql = "INSERT INTO tbl_memories (user_id, capsule_id, type, content_text, media_url, thumbnail_url, capture_date, visibility) VALUES (?, ?, ?, ?, ?, ?, ?, ?)";
@@ -450,7 +533,21 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST["action_post_memory"]))
 mysqli_stmt_close($dstmt);
     }
 }
-    header("Location: aboutyou.php" . ($capsule_id ? "?capsule_id=" . $capsule_id : ""));
+    // ★ AJAX 請求：回傳 JSON（含成功/警告訊息、重導 URL）
+    $redirect_url = 'aboutyou.php' . ($capsule_id ? "?capsule_id=" . $capsule_id : "");
+    if (isset($_SERVER['HTTP_X_REQUESTED_WITH'])
+        && strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) === 'xmlhttprequest') {
+        header('Content-Type: application/json; charset=utf-8');
+        $resp = ['success' => true, 'redirect' => $redirect_url];
+        if (isset($_SESSION['upload_error'])) {
+            $resp['warning'] = $_SESSION['upload_error'];
+            unset($_SESSION['upload_error']);
+        }
+        echo json_encode($resp, JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+
+    header("Location: $redirect_url");
     exit;
 }
 // 留言提交
@@ -544,6 +641,10 @@ $limit_days = isset($_GET['limit']) ? max(1, intval($_GET['limit'])) : 5;
 $offset_days = isset($_GET['offset']) ? max(0, intval($_GET['offset'])) : 0;
 
 if ($is_ajax) {
+    // ★ 先清掉所有早於此處的殘留輸出（config.php 的 BOM、尾隨換行、意外警告等）
+    while (ob_get_level() > 0) {
+        ob_end_clean();
+    }
     ob_start(); // 開始緩衝
 }
 
@@ -584,28 +685,39 @@ if ($selected_capsule_id && $selected_capsule_info) {
     // 3. 根據獲取的日期列表，一次撈取這些天數內所有的記憶
     if (!empty($date_list)) {
         $date_placeholders = implode(',', array_fill(0, count($date_list), '?'));
-        $mem_sql = "SELECT m.id, m.type, m.content_text, m.media_url, m.capture_date, m.created_at, 
+        $mem_sql = "SELECT m.id, m.type, m.content_text, m.media_url, m.thumbnail_url, m.capture_date, m.created_at, 
                            m.user_id as memory_owner_id, u.username, u.nickname, u.icon_url
                     FROM tbl_memories m 
                     JOIN tbl_user u ON m.user_id = u.id
-                    WHERE m.capsule_id = ? AND m.capture_date IN ($date_placeholders)
+                    WHERE m.capsule_id = ? 
+		    AND (m.user_id = ? OR EXISTS (
+                          SELECT 1 FROM tbl_memory_shared s 
+                          WHERE s.memory_id = m.id AND FIND_IN_SET(?, s.target_user_ids) > 0
+                      ))
+		    AND m.capture_date IN ($date_placeholders)
                     ORDER BY m.capture_date DESC, m.created_at ASC";
         
-        $params = array_merge([$selected_capsule_id], $date_list);
+        $params = array_merge([$selected_capsule_id, $user_id, $user_id], $date_list);
         $stmt = mysqli_prepare($link, $mem_sql);
-        $types = "i" . str_repeat("s", count($date_list));
-        mysqli_stmt_bind_param($stmt, $types, ...$params);
-        mysqli_stmt_execute($stmt);
-        $mem_res = mysqli_stmt_get_result($stmt);
-        while ($m = mysqli_fetch_assoc($mem_res)) {
-            $m['nickname'] = $m['nickname'] ?? $m['username'];
-            $m['icon_url'] = $m['icon_url'] ?? 'images/default_avatar.png';
-            $memories[] = $m;
-        }
+	if ($stmt === false) {
+	    error_log('[aboutyou ajax] mem_sql prepare failed: ' . mysqli_error($link));
+	} else {
+	       $types = "iii" . str_repeat("s", count($date_list));
+	        mysqli_stmt_bind_param($stmt, $types, ...$params);
+	        if (!mysqli_stmt_execute($stmt)) {
+		        error_log('[aboutyou ajax] mem_sql execute failed: ' . mysqli_stmt_error($stmt));
+		} else {
+	        	$mem_res = mysqli_stmt_get_result($stmt);
+		        while ($m = mysqli_fetch_assoc($mem_res)) {
+		            $m['nickname'] = $m['nickname'] ?? $m['username'];
+		            $m['icon_url'] = $m['icon_url'] ?? 'images/default_avatar.png';
+		            $memories[] = $m;
+		        }
+		}
         mysqli_stmt_close($stmt);
     }
 }
-
+}
 $login_type_display = ($is_device_login) ? '📱 自動登入' : '';
 
 function render_memories_html($memories, $offset_days, $user_id, $selected_capsule_id, $comments_data) {
@@ -625,7 +737,7 @@ function render_memories_html($memories, $offset_days, $user_id, $selected_capsu
             $media_items = [];
             foreach ($mems as $m) {
                 if (!empty($m['media_url'])) {
-                    $media_items[] = ['id'=>$m['id'], 'url'=>$m['media_url'], 'type'=>$m['type'], 'owner_id'=>$m['memory_owner_id']];
+                    $media_items[] = ['id'=>$m['id'], 'url'=>$m['media_url'], 'thumb' => $m['thumbnail_url'] ?? null, 'type'=>$m['type'], 'owner_id'=>$m['memory_owner_id']];
                 }
             }
             if (count($media_items)) {
@@ -634,7 +746,13 @@ function render_memories_html($memories, $offset_days, $user_id, $selected_capsu
                     $isOwn = ($md['owner_id'] == $user_id);
                     $html .= '<div class="media-thumb" onclick="openLightbox(\''.$module_hash.'\','.$idx.')">';
                     if ($md['type']==='video' || isVideoFile($md['url'])) {
-                        $html .= '<video src="'.htmlspecialchars($md['url']).'" muted preload="metadata"></video><span class="thumb-type-tag">🎥</span>';
+	    		if (!empty($md['thumb']) && file_exists($md['thumb'])) {
+		            // ★ 有 ffmpeg 縮圖 → 用 img，iOS 也能正常顯示
+		            $html .= '<img src="'.htmlspecialchars($md['thumb']).'" alt="" loading="lazy"><span class="thumb-type-tag">🎥</span>';
+			} else {
+                            // fallback：沒縮圖時才用 video
+			    $html .= '<video src="'.htmlspecialchars($md['url']).'" muted preload="metadata" playsinline webkit-playsinline></video><span class="thumb-type-tag">🎥</span>';
+			}
                     } else {
                         $html .= '<img src="'.htmlspecialchars($md['url']).'" alt="" loading="lazy"><span class="thumb-type-tag">📷</span>';
                     }
@@ -709,11 +827,16 @@ function render_memories_html($memories, $offset_days, $user_id, $selected_capsu
 
 // 判斷若是 AJAX，則直接輸出函數結果並結束
 if ($is_ajax) {
-    header('Content-Type: application/json');
+    // ★ 丟棄緩衝區中任何意外輸出，保證 JSON 純淨
+    if (ob_get_level() > 0) {
+        ob_end_clean();
+    }
+    header('Content-Type: application/json; charset=utf-8');
+    header('X-Content-Type-Options: nosniff');
     echo json_encode([
         'html' => render_memories_html($memories, $offset_days, $user_id, $selected_capsule_id, $comments_data),
         'has_more' => ($offset_days + $limit_days < $total_days)
-    ]);
+    ], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
     exit;
 }
 
@@ -846,7 +969,39 @@ mysqli_close($link);
         .comment-avatar { width: 20px; height: 20px; border-radius: 50%; object-fit: cover; vertical-align: middle; margin-right: 4px; }
         .lightbox { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.93); z-index: 9999; flex-direction: column; align-items: center; justify-content: center; }
         .lightbox.active { display: flex; }
-        .lightbox img, .lightbox video { max-width: 95vw; max-height: 75vh; object-fit: contain; border-radius: 6px; }
+        /* ===== Lightbox 媒體容器：交叉淡入淡出 + 支援手勢 ===== */
+#lightbox-content {
+    position: relative;
+    width: 95vw;
+    height: 75vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    touch-action: none;          /* 讓自訂手勢生效 */
+    -webkit-user-select: none;
+    user-select: none;
+}
+#lightbox-content .lb-media-item {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%) scale(1);
+    max-width: 95vw;
+    max-height: 75vh;
+    object-fit: contain;
+    border-radius: 6px;
+    opacity: 0;
+    transition: opacity 0.18s ease;
+    will-change: transform, opacity;
+    user-select: none;
+    -webkit-user-drag: none;
+    -webkit-touch-callout: none;
+    pointer-events: none;
+}
+#lightbox-content .lb-media-item[data-visible="1"] {
+    pointer-events: auto;
+}
         .lightbox-top-bar { position: absolute; top: max(10px, env(safe-area-inset-top)); right: 10px; display: flex; gap: 8px; z-index: 10; }
         .lightbox-top-bar button { background: rgba(255,255,255,0.15); color: #fff; border: 1px solid rgba(255,255,255,0.2); border-radius: 20px; padding: 8px 14px; font-size: 14px; cursor: pointer; font-family: inherit; min-height: 40px; }
         .lightbox-nav-area { position: absolute; top: 50%; transform: translateY(-50%); width: 45px; height: 55px; display: flex; align-items: center; justify-content: center; font-size: 26px; color: rgba(255,255,255,0.6); cursor: pointer; z-index: 10; }
@@ -1050,6 +1205,70 @@ mysqli_close($link);
     color: #333;         /* 深色文字保持可读 */
     box-shadow: 0 1px 4px rgba(0,0,0,0.15);
 }
+/* ===== 上傳進度條 Overlay ===== */
+.upload-progress-overlay {
+    display: none;
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(74, 55, 40, 0.55);
+    backdrop-filter: blur(3px);
+    -webkit-backdrop-filter: blur(3px);
+    z-index: 99999;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+}
+.upload-progress-overlay.active { display: flex; }
+.upload-progress-card {
+    background: var(--card);
+    border-radius: var(--radius-lg);
+    padding: 28px 24px;
+    width: 100%;
+    max-width: 360px;
+    text-align: center;
+    box-shadow: 0 20px 60px rgba(74, 55, 40, 0.25);
+    border: 1px solid var(--border-light);
+}
+.upload-progress-icon { font-size: 42px; margin-bottom: 8px; display: block; }
+.upload-progress-title {
+    font-size: 17px; font-weight: 600;
+    color: var(--text); margin-bottom: 16px;
+}
+.upload-progress-bar {
+    width: 100%; height: 10px;
+    background: var(--primary-light);
+    border-radius: 6px; overflow: hidden;
+    margin-bottom: 12px;
+}
+.upload-progress-fill {
+    height: 100%; width: 0%;
+    background: linear-gradient(90deg, #c9a77b, var(--primary));
+    border-radius: 6px;
+    transition: width 0.25s ease;
+}
+.upload-progress-fill.processing {
+    background: linear-gradient(90deg, var(--primary), #e0c8a0, var(--primary));
+    background-size: 200% 100%;
+    animation: uploadStripes 1.4s linear infinite;
+}
+@keyframes uploadStripes {
+    0%   { background-position: 100% 0; }
+    100% { background-position: -100% 0; }
+}
+.upload-progress-text { font-size: 13px; color: var(--text-soft); margin-bottom: 4px; font-weight: 500; }
+.upload-progress-hint { font-size: 11px; color: var(--text-light); line-height: 1.5; }
+.upload-progress-card.failed .upload-progress-title { color: #c0392b; }
+.upload-progress-card.failed .upload-progress-fill {
+    background: #c9958b !important; width: 100% !important; animation: none !important;
+}
+.upload-progress-close {
+    margin-top: 16px; padding: 8px 24px;
+    border: none; border-radius: 20px;
+    background: var(--primary); color: #fff;
+    font-family: inherit; font-size: 14px; font-weight: 500;
+    cursor: pointer; min-height: 38px;
+}
+.upload-progress-close:active { transform: scale(0.96); }
     </style>
 </head>
 <body>
@@ -1231,6 +1450,19 @@ mysqli_close($link);
     <?php endif; ?>
 </div>
 
+<!-- 上傳進度 Overlay -->
+<div id="upload-progress-overlay" class="upload-progress-overlay">
+    <div class="upload-progress-card" id="upload-progress-card">
+        <span class="upload-progress-icon" id="upload-progress-icon">📤</span>
+        <div class="upload-progress-title" id="upload-progress-title">上傳中…</div>
+        <div class="upload-progress-bar">
+            <div id="upload-progress-fill" class="upload-progress-fill"></div>
+        </div>
+        <div class="upload-progress-text" id="upload-progress-text">準備中…</div>
+        <div class="upload-progress-hint" id="upload-progress-hint">請勿關閉或重新整理視窗</div>
+    </div>
+</div>
+
 <!-- ===== 原有 Lightbox、Modal 等（完全保留） ===== -->
 <div class="lightbox" id="lightbox">
     <div class="lightbox-top-bar"><button id="lightbox-delete-btn">🗑️ 刪除</button><button onclick="closeLightbox()">✕ 關閉</button></div>
@@ -1250,10 +1482,256 @@ let lb={hash:null,items:[],idx:0,deleted:false};
 let currentDayFirstMemoryId = null;
 window.currentDayMedia = [];
 function openLightbox(h,i){const d=window['mediaData_'+h];if(!d||!d.length)return;lb.hash=h;lb.items=[...d];lb.idx=Math.min(i,d.length-1);lb.deleted=false;document.getElementById('lightbox').classList.add('active');document.body.style.overflow='hidden';renderLb();}
-function closeLightbox(){document.getElementById('lightbox').classList.remove('active');document.body.style.overflow='';if(lb.deleted)location.reload();}
+function closeLightbox() {
+    document.getElementById('lightbox').classList.remove('active');
+    document.body.style.overflow = '';
+    if (window.__lbResetZoom) window.__lbResetZoom();
+    if (lb.deleted) location.reload();
+}
 function lightboxNavigate(d){const n=lb.idx+d;if(n<0||n>=lb.items.length)return;lb.idx=n;renderLb();}
-function renderLb(){const m=lb.items[lb.idx],c=document.getElementById('lightbox-content'),ct=document.getElementById('lightbox-counter'),p=document.getElementById('lightbox-prev'),n=document.getElementById('lightbox-next'),db=document.getElementById('lightbox-delete-btn');c.innerHTML='';if(m.type==='video'||/\.(mp4|webm|mov|avi|mkv|flv|wmv)$/i.test(m.url)){const v=document.createElement('video');v.src=m.url;v.controls=true;v.style.maxWidth='95vw';v.style.maxHeight='75vh';c.appendChild(v);}else{const img=document.createElement('img');img.src=m.url;img.alt='';c.appendChild(img);}ct.textContent=(lb.idx+1)+' / '+lb.items.length;p.style.display=lb.idx===0?'none':'flex';n.style.display=lb.idx>=lb.items.length-1?'none':'flex';db.style.display=(m.owner_id==<?php echo $user_id; ?>)?'inline-block':'none';db.onclick=async function(){if(!confirm('確定要刪除嗎？'))return;const mid=lb.items[lb.idx].id;lb.deleted=true;lb.items.splice(lb.idx,1);if(!lb.items.length){closeLightbox();location.reload();return;}if(lb.idx>=lb.items.length)lb.idx=lb.items.length-1;renderLb();document.getElementById('lightbox-delete-memory-id').value=mid;try{await fetch(document.getElementById('lightbox-delete-form').action,{method:'POST',body:new FormData(document.getElementById('lightbox-delete-form'))});}catch(e){}};}
-document.getElementById('lightbox').addEventListener('touchstart',function(e){tsx=e.touches[0].clientX;});document.getElementById('lightbox').addEventListener('touchend',function(e){const d=tsx-e.changedTouches[0].clientX;if(Math.abs(d)>60)lightboxNavigate(d>0?1:-1);});
+let lbRenderToken = 0;
+
+function renderLb() {
+    const m = lb.items[lb.idx];
+    if (!m) return;
+    const c  = document.getElementById('lightbox-content');
+    const ct = document.getElementById('lightbox-counter');
+    const p  = document.getElementById('lightbox-prev');
+    const n  = document.getElementById('lightbox-next');
+    const db = document.getElementById('lightbox-delete-btn');
+
+    // 切換時重置縮放
+    if (window.__lbResetZoom) window.__lbResetZoom();
+
+    const isVideo = m.type === 'video'
+        || /\.(mp4|webm|mov|avi|mkv|flv|wmv)$/i.test(m.url);
+    const token = ++lbRenderToken;
+
+    // 1) 先建好新媒體元素（此時 opacity=0）
+    const newEl = document.createElement(isVideo ? 'video' : 'img');
+    newEl.className = 'lb-media-item';
+    if (isVideo) {
+        newEl.src = m.url;
+        newEl.controls = true;
+        newEl.playsInline = true;
+        newEl.setAttribute('webkit-playsinline', '');
+        newEl.preload = 'metadata';
+    } else {
+        newEl.src = m.url;
+        newEl.alt = '';
+        newEl.draggable = false;
+    }
+
+    // 2) 新媒體「準備好」後才揭露，同時讓舊媒體淡出
+    let revealed = false;
+    const reveal = () => {
+        if (revealed) return;
+        if (token !== lbRenderToken) {          // 已有更新的渲染請求
+            if (newEl.parentNode) newEl.remove();
+            return;
+        }
+        revealed = true;
+
+        // 舊元素（可能有多個殘留）先標記為淡出
+        const olds = Array.from(c.querySelectorAll('.lb-media-item'));
+        olds.forEach(el => {
+            el.dataset.visible = '0';
+            el.style.opacity = '0';
+        });
+
+        c.appendChild(newEl);
+        void newEl.offsetWidth;                  // 強制 reflow
+        newEl.dataset.visible = '1';
+        newEl.style.opacity = '1';
+
+        // 220ms 後清掉舊元素
+        setTimeout(() => {
+            olds.forEach(el => { if (el.parentNode) el.remove(); });
+        }, 220);
+    };
+
+    if (isVideo) {
+        newEl.addEventListener('loadeddata', reveal, { once: true });
+        setTimeout(reveal, 250);                 // fallback
+    } else {
+        if (newEl.complete && newEl.naturalWidth > 0) {
+            reveal();                            // 快取命中，立刻顯示
+        } else {
+            newEl.addEventListener('load',  reveal, { once: true });
+            newEl.addEventListener('error', reveal, { once: true });
+            setTimeout(reveal, 1500);            // fallback
+        }
+    }
+
+    // 3) UI 更新
+    ct.textContent = (lb.idx + 1) + ' / ' + lb.items.length;
+    p.style.display = lb.idx === 0 ? 'none' : 'flex';
+    n.style.display = lb.idx >= lb.items.length - 1 ? 'none' : 'flex';
+    db.style.display = (m.owner_id == <?php echo $user_id; ?>) ? 'inline-block' : 'none';
+
+    db.onclick = async function () {
+        if (!confirm('確定要刪除嗎？')) return;
+        const mid = lb.items[lb.idx].id;
+        lb.deleted = true;
+        lb.items.splice(lb.idx, 1);
+        if (!lb.items.length) { closeLightbox(); location.reload(); return; }
+        if (lb.idx >= lb.items.length) lb.idx = lb.items.length - 1;
+        renderLb();
+        document.getElementById('lightbox-delete-memory-id').value = mid;
+        try {
+            await fetch(document.getElementById('lightbox-delete-form').action, {
+                method: 'POST',
+                body: new FormData(document.getElementById('lightbox-delete-form'))
+            });
+        } catch (e) {}
+    };
+}
+// ============================================================
+// ★ Lightbox 手勢：雙指縮放 / 單指拖曳 / 左右滑動切圖
+// ============================================================
+(function () {
+    const lbContent = document.getElementById('lightbox-content');
+    if (!lbContent) return;
+
+    const zoom = {
+        scale: 1, tx: 0, ty: 0,
+        startScale: 1, startTx: 0, startTy: 0,
+        pinchStartDist: 0,
+        panStartX: 0, panStartY: 0,
+        isPinching: false, isPanning: false,
+        didPinch: false, didPan: false,
+        startTouchX: 0, startTouchY: 0, startTime: 0,
+    };
+
+    function getActiveEl() {
+        const els = lbContent.querySelectorAll('.lb-media-item[data-visible="1"]');
+        return els.length ? els[els.length - 1] : null;
+    }
+
+    function applyTransform(animate) {
+        const el = getActiveEl();
+const navs = document.querySelectorAll('.lightbox-nav-area');
+        if (!el) return;
+        el.style.transition = animate ? 'transform 0.18s ease' : 'none';
+        el.style.transform =
+            `translate(-50%, -50%) translate(${zoom.tx}px, ${zoom.ty}px) scale(${zoom.scale})`;
+navs.forEach(el => el.style.opacity = zoom.scale > 1.05 ? '0' : '0.6');
+    }
+
+    function resetZoom() {
+        zoom.scale = 1; zoom.tx = 0; zoom.ty = 0;
+        zoom.isPinching = false; zoom.isPanning = false;
+        zoom.didPinch = false; zoom.didPan = false;
+        const el = getActiveEl();
+        if (el) {
+            el.style.transition = 'transform 0.18s ease';
+            el.style.transform = 'translate(-50%, -50%) scale(1)';
+        }
+    }
+    window.__lbResetZoom = resetZoom;
+
+    lbContent.addEventListener('touchstart', function (e) {
+        const el = getActiveEl();
+        if (!el) return;
+
+        if (e.touches.length === 2) {
+            zoom.isPinching = true;
+            zoom.didPinch = true;
+            zoom.isPanning = false;
+            const t1 = e.touches[0], t2 = e.touches[1];
+            zoom.pinchStartDist =
+                Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY) || 1;
+            zoom.startScale = zoom.scale;
+            el.style.transition = 'none';
+        } else if (e.touches.length === 1) {
+            const t = e.touches[0];
+            zoom.startTouchX = t.clientX;
+            zoom.startTouchY = t.clientY;
+            zoom.startTime = Date.now();
+            zoom.panStartX = t.clientX;
+            zoom.panStartY = t.clientY;
+            zoom.startTx = zoom.tx;
+            zoom.startTy = zoom.ty;
+            if (zoom.scale > 1.02) {
+                zoom.isPanning = true;
+                zoom.didPan = true;
+                el.style.transition = 'none';
+            }
+        }
+    }, { passive: true });
+
+    lbContent.addEventListener('touchmove', function (e) {
+        if (zoom.isPinching && e.touches.length === 2) {
+            const t1 = e.touches[0], t2 = e.touches[1];
+            const dist = Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
+            let newScale = zoom.startScale * (dist / zoom.pinchStartDist);
+            newScale = Math.max(1, Math.min(5, newScale));
+            zoom.scale = newScale;
+            if (zoom.scale <= 1.02) { zoom.tx = 0; zoom.ty = 0; }
+            applyTransform(false);
+            e.preventDefault();
+        } else if (zoom.isPanning && e.touches.length === 1) {
+            const t = e.touches[0];
+            zoom.tx = zoom.startTx + (t.clientX - zoom.panStartX);
+            zoom.ty = zoom.startTy + (t.clientY - zoom.panStartY);
+            applyTransform(false);
+            e.preventDefault();
+        }
+    }, { passive: false });
+
+    lbContent.addEventListener('touchend', function (e) {
+        if (e.touches.length === 0) {
+            if (zoom.isPinching) {
+                zoom.isPinching = false;
+                if (zoom.scale < 1.05) {
+                    zoom.scale = 1; zoom.tx = 0; zoom.ty = 0;
+                }
+                applyTransform(true);
+            }
+            if (zoom.isPanning) {
+                zoom.isPanning = false;
+                applyTransform(true);
+            }
+
+            // 只有「沒縮放、沒拖曳」時，單指滑動才觸發切圖
+            if (!zoom.didPinch && !zoom.didPan && zoom.scale <= 1.05) {
+                const t = e.changedTouches[0];
+                const dx = t.clientX - zoom.startTouchX;
+                const dy = t.clientY - zoom.startTouchY;
+                const dt = Date.now() - zoom.startTime;
+                if (Math.abs(dx) > 50 &&
+                    Math.abs(dx) > Math.abs(dy) * 1.5 &&
+                    dt < 600) {
+                    lightboxNavigate(dx > 0 ? -1 : 1);
+                }
+            }
+	    // 在 touchend 內，若 !didPinch && !didPan 且單指快速點兩下：
+const now = Date.now();
+if (now - zoom.lastTap < 300) {
+    zoom.scale = zoom.scale > 1.05 ? 1 : 2.5;
+    if (zoom.scale === 1) { zoom.tx = 0; zoom.ty = 0; }
+    applyTransform(true);
+    zoom.lastTap = 0;
+} else {
+    zoom.lastTap = now;
+}
+            zoom.didPinch = false;
+            zoom.didPan = false;
+        } else if (e.touches.length === 1 && zoom.isPinching) {
+            // 雙指抬起一指 → 進入單指拖曳
+            zoom.isPinching = false;
+            if (zoom.scale > 1.02) {
+                zoom.isPanning = true;
+                zoom.didPan = true;
+                const t = e.touches[0];
+                zoom.panStartX = t.clientX;
+                zoom.panStartY = t.clientY;
+                zoom.startTx = zoom.tx;
+                zoom.startTy = zoom.ty;
+            }
+        }
+    }, { passive: true });
+})();
 document.addEventListener('keydown',function(e){if(!document.getElementById('lightbox').classList.contains('active'))return;if(e.key==='ArrowLeft')lightboxNavigate(-1);else if(e.key==='ArrowRight')lightboxNavigate(1);else if(e.key==='Escape')closeLightbox();});
 
 function openTextEditor(id,t){document.getElementById('text-edit-memory-id').value=id;document.getElementById('text-edit-textarea').value=t;document.getElementById('text-edit-modal').classList.add('active');}
@@ -1283,7 +1761,171 @@ document.addEventListener('DOMContentLoaded',function(){
     function makeThumb(fo){const el=document.createElement('div');el.className='preview-thumb';const url=URL.createObjectURL(fo.file);const del=document.createElement('button');del.className='remove-btn';del.textContent='✕';del.onclick=e=>{e.preventDefault();e.stopPropagation();removeFile(fo.id,el);};const tag=document.createElement('span');tag.className='type-tag';if(fo.file.type.startsWith('image/')){const img=document.createElement('img');img.src=url;el.appendChild(img);tag.textContent='📷';}else if(fo.file.type.startsWith('video/')){const v=document.createElement('video');v.src=url;v.muted=true;v.preload='metadata';el.appendChild(v);tag.textContent='🎥';v.addEventListener('loadeddata',()=>v.currentTime=1);}el.appendChild(del);el.appendChild(tag);return el;}
     function removeFile(fid,el){allFiles=allFiles.filter(f=>f.id!==fid);el.style.opacity='0';el.style.transform='scale(0.8)';setTimeout(()=>{renderPreviews();updateInput();},200);}
     function updateInput(){const dt=new DataTransfer();allFiles.forEach(f=>dt.items.add(f.file));input.files=dt.files;}
-    form.addEventListener('submit',function(e){if(!allFiles.length&&!this.querySelector('textarea').value.trim()){e.preventDefault();alert('請選擇照片或寫一些文字');return false;}const cd={};allFiles.forEach(f=>cd[f.file.name]=f.date);datesInput.value=JSON.stringify(cd);return true;});
+    // 伺服器限制（由 PHP 注入）
+const SERVER_POST_MAX   = <?php echo th_return_bytes(ini_get('post_max_size')); ?>;
+const SERVER_UPLOAD_MAX = <?php echo th_return_bytes(ini_get('upload_max_filesize')); ?>;
+const SERVER_FILE_MAX   = <?php echo th_return_bytes(ini_get('upload_max_filesize')); ?>;
+const EFFECTIVE_LIMIT   = Math.min(SERVER_POST_MAX, SERVER_UPLOAD_MAX);
+
+// ===== 送出表單：改用 XHR 上傳 + 進度條 =====
+let isSubmitting = false;
+
+form.addEventListener('submit', function(e) {
+    e.preventDefault();                 // ★ 一律攔截，改由 JS 送出
+    if (isSubmitting) return false;     // ★ 防連點
+    isSubmitting = true;
+
+    const hasText = this.querySelector('textarea').value.trim().length > 0;
+    if (!allFiles.length && !hasText) {
+        alert('請選擇照片或寫一些文字');
+        isSubmitting = false;
+        return false;
+    }
+
+    // 逐檔大小檢查
+    for (const f of allFiles) {
+        if (f.file.size > SERVER_FILE_MAX) {
+            alert(`檔案「${f.file.name}」大小 ${(f.file.size/1048576).toFixed(1)}MB，\n超過單檔上限 ${(SERVER_FILE_MAX/1048576).toFixed(1)}MB。\n請先壓縮或改用電腦上傳。`);
+            isSubmitting = false;
+            return false;
+        }
+    }
+
+    // 總大小檢查
+    const total = allFiles.reduce((s, f) => s + f.file.size, 0);
+    if (total > EFFECTIVE_LIMIT * 0.95) {
+        alert(
+          `本次要上傳 ${allFiles.length} 個檔案，總大小 ${(total/1048576).toFixed(1)}MB，\n` +
+          `超過伺服器允許的 ${(EFFECTIVE_LIMIT/1048576).toFixed(1)}MB。\n\n` +
+          `建議：\n• 一次只上傳 1–2 個檔案\n• 或先壓縮影片再上傳`
+        );
+        isSubmitting = false;
+        return false;
+    }
+
+    // 寫入 client_dates
+    const cd = {};
+    allFiles.forEach(f => cd[f.file.name] = f.date);
+    datesInput.value = JSON.stringify(cd);
+
+    // ===== 開始 AJAX 上傳 =====
+    startAjaxUpload(this);
+    return false;
+});
+
+function startAjaxUpload(form) {
+    const overlay = document.getElementById('upload-progress-overlay');
+    const card    = document.getElementById('upload-progress-card');
+    const iconEl  = document.getElementById('upload-progress-icon');
+    const titleEl = document.getElementById('upload-progress-title');
+    const fillEl  = document.getElementById('upload-progress-fill');
+    const textEl  = document.getElementById('upload-progress-text');
+    const hintEl  = document.getElementById('upload-progress-hint');
+    const submitBtn = form.querySelector('button[type="submit"]');
+
+    // 復原狀態
+    overlay.classList.add('active');
+    card.classList.remove('failed');
+    const oldClose = card.querySelector('.upload-progress-close');
+    if (oldClose) oldClose.remove();
+    fillEl.classList.remove('processing');
+    fillEl.style.width = '0%';
+    iconEl.textContent = '📤';
+    titleEl.textContent = '上傳中…';
+    textEl.textContent = '準備中…';
+    hintEl.textContent = '請勿關閉或重新整理視窗';
+    if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = '⏳ 發佈中…'; }
+
+    const formData = new FormData(form);
+    const xhr = new XMLHttpRequest();
+    let uploadPhaseDone = false;
+
+    // ── 上傳位元組階段（0–95%）
+    xhr.upload.addEventListener('progress', function(ev) {
+        if (!ev.lengthComputable) return;
+        const rawPct = ev.loaded / ev.total;
+        const pct = Math.min(95, rawPct * 95);
+        fillEl.style.width = pct + '%';
+
+        const loadedMB = (ev.loaded / 1048576).toFixed(1);
+        const totalMB  = (ev.total  / 1048576).toFixed(1);
+        textEl.textContent = `上傳中 ${pct.toFixed(0)}%  (${loadedMB} / ${totalMB} MB)`;
+    });
+
+    // ── 位元組送完 → 進入伺服器處理階段（不確定進度動畫）
+    xhr.upload.addEventListener('load', function() {
+        uploadPhaseDone = true;
+        fillEl.classList.add('processing');
+        fillEl.style.width = '100%';
+        titleEl.textContent = '伺服器處理中…';
+        textEl.textContent = '正在儲存檔案、生成縮圖';
+        hintEl.textContent = '依檔案數量與大小，可能需要數秒至數十秒，請稍候';
+    });
+
+    // ── 收到回應
+    xhr.addEventListener('load', function() {
+        let resp = null;
+        try { resp = JSON.parse(xhr.responseText); } catch (err) {}
+
+        if (xhr.status === 200 && resp && resp.success) {
+            fillEl.classList.remove('processing');
+            fillEl.style.width = '100%';
+            iconEl.textContent = '✅';
+            titleEl.textContent = '發佈成功！';
+            textEl.textContent = resp.warning ? '（部分檔案有警告）' : '正在跳轉…';
+            hintEl.textContent = resp.warning || '';
+            setTimeout(() => {
+                window.location.href = resp.redirect || 'aboutyou.php';
+            }, 600);
+            return;
+        }
+
+        showUploadError(
+            (resp && resp.error) ? resp.error : `伺服器回應異常（HTTP ${xhr.status}）`
+        );
+    });
+
+    // ── 網路層錯誤
+    xhr.addEventListener('error', function() {
+        showUploadError('網路連線中斷，請檢查網路後重試。');
+    });
+    xhr.addEventListener('timeout', function() {
+        showUploadError('上傳逾時，請減少檔案數量或壓縮後重試。');
+    });
+    xhr.addEventListener('abort', function() {
+        showUploadError('上傳已取消。');
+    });
+
+    function showUploadError(msg) {
+        card.classList.add('failed');
+        fillEl.classList.remove('processing');
+        fillEl.style.width = '100%';
+        iconEl.textContent = '⚠️';
+        titleEl.textContent = '上傳失敗';
+        textEl.textContent = '';
+        hintEl.textContent = msg;
+
+        if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = '📤 發佈'; }
+        isSubmitting = false;
+
+        if (!card.querySelector('.upload-progress-close')) {
+            const btn = document.createElement('button');
+            btn.className = 'upload-progress-close';
+            btn.textContent = '關閉';
+            btn.onclick = () => {
+                overlay.classList.remove('active');
+                card.classList.remove('failed');
+            };
+            card.appendChild(btn);
+        }
+    }
+
+    xhr.open('POST', form.action, true);
+    xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
+    // 若上傳量很大可設 timeout（ms）：例如 10 分鐘
+    xhr.timeout = 600000;
+    xhr.send(formData);
+}
 });
 
 // ===== Emoji 功能（原有） =====
@@ -1468,26 +2110,28 @@ function appendEmojiToComment(inputId, emoji) {
                     if (data.count && data.count > 0) {
                         dayBox.classList.add('has-memory');
                         if (data.first_media) {
-                            const url = data.first_media;
-                            // 判斷是否為影片 (根據後端 type 或副檔名)
-                            const isVideo = (data.first_type === 'video') || /\.(mp4|webm|mov|avi|mkv)$/i.test(url);
-                            
-                            // 若為影片且沒有生成 jpg 縮圖，使用 <video> 標籤展示截圖
-                            if (isVideo && !/\.(jpg|jpeg|png|webp|gif|heic)$/i.test(url)) {
-                                const video = document.createElement('video');
-                                video.className = 'day-thumb';
-                                video.src = url;
-                                video.muted = true;
-                                video.preload = 'metadata'; // 載入首幀畫面
-                                video.addEventListener('loadeddata', () => { video.currentTime = 0.5; }); // 自動定格在第 0.5 秒
-                                dayBox.appendChild(video);
-                            } else {
-                                const img = new Image();
-                                img.className = 'day-thumb';
-                                img.src = url;
-                                dayBox.appendChild(img);
-                            }
-                        }
+ 			   const url = data.first_media;
+			    const looksLikeImage = /\.(jpg|jpeg|png|webp|gif|heic|bmp)$/i.test(url);
+
+			    if (looksLikeImage) {
+			        // ★ 照片、或影片的 ffmpeg 縮圖，都用 <img>
+			        const img = new Image();
+			        img.className = 'day-thumb';
+			        img.src = url;
+			        dayBox.appendChild(img);
+			    } else {
+			        // 沒有縮圖的影片 → fallback 用 <video>（iOS 可能仍黑，但至少 Android 正常）
+			        const video = document.createElement('video');
+			        video.className = 'day-thumb';
+			        video.src = url;
+			        video.muted = true;
+			        video.playsInline = true;
+			        video.setAttribute('webkit-playsinline', '');
+			        video.preload = 'auto';
+			        video.addEventListener('loadeddata', () => { try { video.currentTime = 0.5; } catch(e){} });
+			        dayBox.appendChild(video);
+			    }
+			}
                     }
                 }
                 const countBadge = document.createElement('span');
@@ -1558,11 +2202,19 @@ function appendEmojiToComment(inputId, emoji) {
                     res.memories.forEach((m) => {
                         if (m.media_url) {
                             hasMedia = true;
-                            let isVideo = m.type === 'video' || /\.(mp4|webm|mov|avi)$/i.test(m.media_url);
-                            let innerHtml = isVideo ? 
-                                `<video src="${escapeHtml(m.media_url)}" muted preload="metadata"></video><span class="thumb-type-tag">🎥</span>` : 
-                                `<img src="${escapeHtml(m.media_url)}" alt="" loading="lazy"><span class="thumb-type-tag">📷</span>`;
-                            let mediaIdx = window.currentDayMedia.length;
+                            const isVideo = m.type === 'video' || /\.(mp4|webm|mov|avi)$/i.test(m.media_url);
+                            let innerHtml;
+                            if (isVideo) {
+                                if (m.thumbnail_url) {
+                                    // ★ 用 ffmpeg 縮圖
+                                    innerHtml = `<img src="${escapeHtml(m.thumbnail_url)}" alt="" loading="lazy"><span class="thumb-type-tag">🎥</span>`;
+                                } else {
+                                    innerHtml = `<video src="${escapeHtml(m.media_url)}" muted preload="metadata" playsinline webkit-playsinline></video><span class="thumb-type-tag">🎥</span>`;
+                                }
+                            } else {
+                                innerHtml = `<img src="${escapeHtml(m.media_url)}" alt="" loading="lazy"><span class="thumb-type-tag">📷</span>`;
+                            }
+                            const mediaIdx = window.currentDayMedia.length;
                             mediaHtml += `<div class="media-thumb" onclick="openCalLightbox(${mediaIdx})">${innerHtml}</div>`;
                             window.currentDayMedia.push({
                                 id: m.id, url: m.media_url, type: m.type, owner_id: m.user_id || 0
@@ -1867,36 +2519,87 @@ function editMilestone(id, btn) {
         }, 120);
     });
 
-    async function loadMore() {
+        async function loadMore() {
+        if (isLoading || !hasMore) return;
         isLoading = true;
         loadingDom.style.display = 'block';
+
         try {
-            const res = await fetch(`aboutyou.php?capsule_id=${capsuleId}&ajax_load=1&offset=${offset}&limit=${limit}`);
-            const data = await res.json();
-            // 使用 DOMParser 解析返回的 HTML 片段
+            // ---------- 1) 發出請求 ----------
+            const res = await fetch(
+                `aboutyou.php?capsule_id=${capsuleId}&ajax_load=1&offset=${offset}&limit=${limit}`,
+                { headers: { 'X-Requested-With': 'XMLHttpRequest' } }
+            );
+
+            // ---------- 2) 先檢查 HTTP 狀態 ----------
+            if (!res.ok) {
+                console.error(`[scroll] HTTP ${res.status} ${res.statusText}`);
+                hasMore = false;
+                if (endDom) endDom.style.display = 'block';
+                return;
+            }
+
+            // ---------- 3) 用 text() 拿原始內容，方便 debug ----------
+            const raw = await res.text();
+
+            // ---------- 4) 手動解析 JSON ----------
+            let data;
+            try {
+                data = JSON.parse(raw);
+            } catch (parseErr) {
+                console.error('[scroll] 伺服器回傳非 JSON，前 500 字元如下：');
+                console.error(raw.slice(0, 500));
+                hasMore = false;   // 停止繼續請求，避免無限迴圈
+                if (endDom) endDom.style.display = 'block';
+                return;
+            }
+
+            // ---------- 5) 驗證回應結構 ----------
+            if (!data || typeof data.html !== 'string') {
+                console.error('[scroll] 回應格式錯誤，缺少 html 欄位：', data);
+                hasMore = false;
+                if (endDom) endDom.style.display = 'block';
+                return;
+            }
+
+            // ---------- 6) 解析 HTML 並執行內嵌 script ----------
             const parser = new DOMParser();
             const doc = parser.parseFromString(data.html, 'text/html');
-            // 执行所有 <script> 标签内的代码（定义 mediaData_xxx 变量）
+
+            // 執行所有 <script>（定義 window.mediaData_xxx 等）
             const scripts = doc.querySelectorAll('script');
             scripts.forEach(script => {
                 if (script.textContent.trim()) {
                     try {
-                        eval(script.textContent);
+                        // 用 Function 比 eval 稍微安全一點，並且不會被 CSP 阻擋
+                        // （若你的站台有嚴格 CSP，仍可能失敗，到時再處理）
+                        (new Function(script.textContent))();
                     } catch (e) {
-                        console.error('执行脚本失败:', e);
+                        console.error('[scroll] 執行內嵌 script 失敗:', e, script.textContent.slice(0, 200));
                     }
                 }
             });
-            // 获取不含 <script> 的 body 内容并插入页面
+
+            // ---------- 7) 把 HTML 插入頁面（不包含 <script>） ----------
+            // 先把 script 從 doc 中移除，再取 body.innerHTML，
+            // 避免瀏覽器插入後又執行一次造成重複定義
+            scripts.forEach(s => s.remove());
             const bodyContent = doc.body.innerHTML;
             wrapperDom.insertAdjacentHTML('beforeend', bodyContent);
+
+            // ---------- 8) 更新狀態 ----------
             offset += limit;
-            hasMore = data.has_more;
+            hasMore = !!data.has_more;
+
             if (!hasMore) {
-                endDom.style.display = 'block';
+                if (endDom) endDom.style.display = 'block';
             }
+
         } catch (err) {
-            console.error('滚动加载异常:', err);
+            // 網路層錯誤（斷線、CORS、DNS 等）
+            console.error('[scroll] 網路或解析異常:', err);
+            // 不把 hasMore 設為 false，允許使用者之後再捲動重試
+            // 但如果連續失敗多次，可以考慮加個失敗計數器
         } finally {
             loadingDom.style.display = 'none';
             isLoading = false;
