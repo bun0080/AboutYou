@@ -106,7 +106,7 @@ INSERT INTO `tbl_user` (`id`, `username`, `nickname`, `icon_url`, `relationship`
 
 ## 使用建議
 1. SQL創建user
-2. 使用/ay_login.pgp登錄
+2. 使用/ay_login.php登錄
 3. 點擊[📱 裝置] 新增移動設備. 減少頻繁的使用登錄信息(account+password)登錄
 4. PWA 安裝
 5. 開始使用
