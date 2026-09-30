@@ -1,7 +1,12 @@
 {
-  "name": "Baby - 回憶時光機",
-  "short_name": "Baby - 回憶時光機",
+  "name": "BB - 回憶時光機",
+  "short_name": "BB - 回憶時光機",
   "icons": [
+    {
+      "src": "/android_512x512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    },
     {
       "src": "/android_192x192.png",
       "sizes": "192x192",
