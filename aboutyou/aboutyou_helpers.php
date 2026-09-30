@@ -304,6 +304,45 @@ function createThumbnail($source_path, $thumb_path, $width = 150, $height = 150)
     return $success;
 }
 
+
+/**
+ * ★ 用 ffmpeg 從影片抽一張 JPEG 縮圖（解決 iOS Safari 黑畫面）
+ *
+ * @param string $video_path  影片檔路徑
+ * @param string $thumb_path  輸出 JPEG 路徑
+ * @param float  $seek_sec    抽第幾秒的畫面（預設 0.5 秒，避免黑幀）
+ * @param int    $width       縮圖寬度（高度等比）
+ * @return bool
+ */
+function createVideoThumbnail($video_path, $thumb_path, $seek_sec = 0.5, $width = 400) {
+    if (!file_exists($video_path)) return false;
+
+    $ffmpeg = trim(shell_exec('which ffmpeg 2>/dev/null') ?? '');
+    if (empty($ffmpeg)) {
+        error_log("createVideoThumbnail: ffmpeg not found");
+        return false;
+    }
+
+    // -ss 放在 -i 前面 = 快速 seek；-frames:v 1 只抽一張
+    $cmd = escapeshellcmd($ffmpeg)
+         . " -y -ss " . escapeshellarg((string)$seek_sec)
+         . " -i " . escapeshellarg($video_path)
+         . " -frames:v 1 -vf " . escapeshellarg("scale={$width}:-2")
+         . " -q:v 3 "
+         . escapeshellarg($thumb_path)
+         . " 2>&1";
+
+    $output = shell_exec($cmd);
+
+    if (file_exists($thumb_path) && filesize($thumb_path) > 0) {
+        error_log("createVideoThumbnail: OK -> $thumb_path");
+        return true;
+    }
+    error_log("createVideoThumbnail: FAILED. ffmpeg output: " . ($output ?? 'null'));
+    return false;
+}
+
+
 /**
  * ★ Get capture date - Updated for HEIF files
  */
@@ -420,4 +459,4 @@ function debugExifData($file_path) {
     }
     echo "</pre>";
 }
-?>
+
