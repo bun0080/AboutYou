@@ -194,6 +194,10 @@ if (isset($_GET['ajax_action']) && $_GET['ajax_action'] === 'trajectory') {
                 ))
                 GROUP BY m.capture_date";
         $stmt = mysqli_prepare($link, $sql);
+ if (!$stmt) {
+        echo json_encode(['error' => 'DB prepare failed: ' . mysqli_error($link)]);
+        exit;
+    }
         mysqli_stmt_bind_param($stmt, "issii", $capsule_id, $start_date, $end_date, $user_id, $user_id);
         mysqli_stmt_execute($stmt);
         $result = mysqli_stmt_get_result($stmt);
@@ -233,15 +237,15 @@ if (isset($_GET['ajax_action']) && $_GET['ajax_action'] === 'trajectory') {
         $date = $_GET['date'];
         // 取得該日所有回憶（不含留言）
         $sql = "SELECT m.id, m.type, m.content_text, m.media_url, m.thumbnail_url, 
-                       u.nickname, u.icon_url, m.user_id
-                FROM tbl_memories m
-                JOIN tbl_user u ON m.user_id = u.id
-                WHERE m.capsule_id = ? AND m.capture_date = ?
-                  AND (m.user_id = ? OR EXISTS (
-                      SELECT 1 FROM tbl_memory_shared s 
-                      WHERE s.memory_id = m.id AND FIND_IN_SET(?, s.target_user_ids) > 0
-                  ))
-                ORDER BY m.created_at ASC";
+               u.nickname, u.icon_url, m.user_id,
+               COALESCE(s.like_it, 0) AS like_it
+        FROM tbl_memories m
+        JOIN tbl_user u ON m.user_id = u.id
+        LEFT JOIN tbl_memory_shared s ON m.id = s.memory_id
+        WHERE m.capsule_id = ? AND m.capture_date = ?
+          AND (m.user_id = ? OR FIND_IN_SET(?, s.target_user_ids) > 0)
+        ORDER BY m.created_at ASC";
+
         $stmt = mysqli_prepare($link, $sql);
         mysqli_stmt_bind_param($stmt, "isii", $capsule_id, $date, $user_id, $user_id);
         mysqli_stmt_execute($stmt);
@@ -282,6 +286,94 @@ if (isset($_GET['ajax_action']) && $_GET['ajax_action'] === 'trajectory') {
         exit;
     }
     echo json_encode(['error' => 'Invalid sub_action']);
+    exit;
+}
+
+// ============================================================
+// ★ STEP 4.5: 喜愛項目（like_it）AJAX 端點
+// ============================================================
+if (isset($_GET['ajax_action']) && $_GET['ajax_action'] === 'toggle_like') {
+    header('Content-Type: application/json; charset=utf-8');
+    header("Cache-Control: no-store, no-cache, must-revalidate, max-age=0");
+
+    $memory_id = isset($_POST['memory_id']) ? intval($_POST['memory_id']) : 0;
+    $like      = isset($_POST['like']) ? (intval($_POST['like']) ? 1 : 0) : 0;
+
+    if ($memory_id <= 0) {
+        echo json_encode(['success' => false, 'error' => 'Invalid memory_id'], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+
+    // 權限檢查：使用者擁有該回憶，或該回憶有共享給他
+    $check_sql = "SELECT m.id FROM tbl_memories m
+                  LEFT JOIN tbl_memory_shared s ON m.id = s.memory_id
+                  WHERE m.id = ?
+                    AND (m.user_id = ? OR FIND_IN_SET(?, s.target_user_ids) > 0)
+                  LIMIT 1";
+    $check_stmt = mysqli_prepare($link, $check_sql);
+    mysqli_stmt_bind_param($check_stmt, "iii", $memory_id, $user_id, $user_id);
+    mysqli_stmt_execute($check_stmt);
+    mysqli_stmt_store_result($check_stmt);
+    if (mysqli_stmt_num_rows($check_stmt) === 0) {
+        mysqli_stmt_close($check_stmt);
+        echo json_encode(['success' => false, 'error' => 'Unauthorized'], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+    mysqli_stmt_close($check_stmt);
+
+    // Upsert：若已存在 → 更新 like_it；若不存在 → 建立一筆，target_user_ids 帶入自己
+    $upsert_sql = "INSERT INTO tbl_memory_shared (memory_id, target_user_ids, like_it)
+                   VALUES (?, ?, ?)
+                   ON DUPLICATE KEY UPDATE like_it = ?";
+    $upsert_stmt = mysqli_prepare($link, $upsert_sql);
+ if (!$upsert_stmt) {
+        echo json_encode(['success' => false, 'error' => 'DB prepare failed: ' . mysqli_error($link)], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+    $target_str  = (string)$user_id;
+    mysqli_stmt_bind_param($upsert_stmt, "isii", $memory_id, $target_str, $like, $like);
+    $ok = mysqli_stmt_execute($upsert_stmt);
+    mysqli_stmt_close($upsert_stmt);
+
+    echo json_encode(['success' => (bool)$ok, 'like_it' => $like], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+if (isset($_GET['ajax_action']) && $_GET['ajax_action'] === 'favorites_list') {
+    header('Content-Type: application/json; charset=utf-8');
+    header("Cache-Control: no-store, no-cache, must-revalidate, max-age=0");
+
+    $fav_capsule_id = isset($_GET['capsule_id']) ? intval($_GET['capsule_id']) : 0;
+    if (!$fav_capsule_id) {
+        echo json_encode(['success' => false, 'error' => 'Missing capsule_id'], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+
+    $sql = "SELECT m.id, m.type, m.content_text, m.media_url, m.thumbnail_url,
+                   m.capture_date, m.created_at, m.user_id AS memory_owner_id
+            FROM tbl_memories m
+            JOIN tbl_memory_shared s ON m.id = s.memory_id
+            WHERE m.capsule_id = ?
+              AND s.like_it = 1
+              AND m.media_url IS NOT NULL AND m.media_url != ''
+              AND (m.user_id = ? OR FIND_IN_SET(?, s.target_user_ids) > 0)
+            ORDER BY m.created_at DESC";
+    $stmt = mysqli_prepare($link, $sql);
+if (!$stmt) {
+        echo json_encode(['success' => false, 'error' => 'DB prepare failed: ' . mysqli_error($link)], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+    mysqli_stmt_bind_param($stmt, "iii", $fav_capsule_id, $user_id, $user_id);
+    mysqli_stmt_execute($stmt);
+    $res = mysqli_stmt_get_result($stmt);
+    $items = [];
+    while ($row = mysqli_fetch_assoc($res)) {
+        $row['like_it'] = 1;
+        $items[] = $row;
+    }
+    mysqli_stmt_close($stmt);
+
+    echo json_encode(['success' => true, 'items' => $items], JSON_UNESCAPED_UNICODE);
     exit;
 }
 
@@ -686,16 +778,15 @@ if ($selected_capsule_id && $selected_capsule_info) {
     if (!empty($date_list)) {
         $date_placeholders = implode(',', array_fill(0, count($date_list), '?'));
         $mem_sql = "SELECT m.id, m.type, m.content_text, m.media_url, m.thumbnail_url, m.capture_date, m.created_at, 
-                           m.user_id as memory_owner_id, u.username, u.nickname, u.icon_url
-                    FROM tbl_memories m 
-                    JOIN tbl_user u ON m.user_id = u.id
-                    WHERE m.capsule_id = ? 
-		    AND (m.user_id = ? OR EXISTS (
-                          SELECT 1 FROM tbl_memory_shared s 
-                          WHERE s.memory_id = m.id AND FIND_IN_SET(?, s.target_user_ids) > 0
-                      ))
-		    AND m.capture_date IN ($date_placeholders)
-                    ORDER BY m.capture_date DESC, m.created_at ASC";
+                   m.user_id AS memory_owner_id, u.username, u.nickname, u.icon_url,
+                   COALESCE(s.like_it, 0) AS like_it
+            FROM tbl_memories m 
+            JOIN tbl_user u ON m.user_id = u.id
+            LEFT JOIN tbl_memory_shared s ON m.id = s.memory_id
+            WHERE m.capsule_id = ? 
+            AND (m.user_id = ? OR FIND_IN_SET(?, s.target_user_ids) > 0)
+            AND m.capture_date IN ($date_placeholders)
+            ORDER BY m.capture_date DESC, m.created_at ASC";
         
         $params = array_merge([$selected_capsule_id, $user_id, $user_id], $date_list);
         $stmt = mysqli_prepare($link, $mem_sql);
@@ -737,7 +828,7 @@ function render_memories_html($memories, $offset_days, $user_id, $selected_capsu
             $media_items = [];
             foreach ($mems as $m) {
                 if (!empty($m['media_url'])) {
-                    $media_items[] = ['id'=>$m['id'], 'url'=>$m['media_url'], 'thumb' => $m['thumbnail_url'] ?? null, 'type'=>$m['type'], 'owner_id'=>$m['memory_owner_id']];
+                    $media_items[] = ['id'=>$m['id'], 'url'=>$m['media_url'], 'thumb' => $m['thumbnail_url'] ?? null, 'type'=>$m['type'], 'owner_id'=>$m['memory_owner_id'], 'like_it'=>intval($m['like_it'] ?? 0)];
                 }
             }
             if (count($media_items)) {
@@ -1007,6 +1098,25 @@ mysqli_close($link);
         .lightbox-nav-area { position: absolute; top: 50%; transform: translateY(-50%); width: 45px; height: 55px; display: flex; align-items: center; justify-content: center; font-size: 26px; color: rgba(255,255,255,0.6); cursor: pointer; z-index: 10; }
         .lightbox-nav-area.left { left: 0; } .lightbox-nav-area.right { right: 0; }
         .lightbox-counter { color: rgba(255,255,255,0.6); font-size: 13px; margin-top: 10px; }
+        #lightbox-like-btn {
+    font-size: 22px;
+    line-height: 1;
+    padding: 6px 12px;
+    background: rgba(255,255,255,0.15);
+    border: 1px solid rgba(255,255,255,0.2);
+    border-radius: 20px;
+    color: #fff;
+    cursor: pointer;
+    transition: transform 0.15s ease, background 0.15s ease;
+}
+#lightbox-like-btn:active {
+    transform: scale(0.9);
+    background: rgba(255,255,255,0.3);
+}
+#lightbox-like-btn.is-liked {
+    background: rgba(255, 105, 130, 0.25);
+    border-color: rgba(255, 105, 130, 0.6);
+}
         .modal-overlay { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.45); z-index: 10000; align-items: center; justify-content: center; }
         .modal-overlay.active { display: flex; }
         .modal-dialog { background: #fff; border-radius: var(--radius-lg); padding: 20px; width: 90%; max-width: 420px; }
@@ -1031,7 +1141,8 @@ mysqli_close($link);
     margin-bottom: 16px;
 }
 .tab-btn {
-    flex: 1;
+    flex: 4 1 0%;
+    min-width: 0;
     padding: 10px 0;
     background: transparent;
     border: none;
@@ -1041,6 +1152,11 @@ mysqli_close($link);
     cursor: pointer;
     border-bottom: 3px solid transparent;
     transition: 0.2s;
+    white-space: nowrap;
+}
+.tab-btn[data-tab="favorites"] {
+    flex: 2 1 0%;   /* 4:4:2 */
+    font-size: 17px;
 }
 .tab-btn.active {
     color: var(--primary);
@@ -1398,6 +1514,7 @@ mysqli_close($link);
         <div class="tab-bar">
             <button class="tab-btn active" data-tab="timeline">📜 回憶牆</button>
             <button class="tab-btn" data-tab="trajectory">📅 軌跡</button>
+            <button class="tab-btn" data-tab="favorites">❤️</button>
         </div>
 
         <!-- 左分頁：回憶牆（原有內容，完全保留） -->
@@ -1444,6 +1561,13 @@ mysqli_close($link);
                 </div>
             </div>
         </div>
+
+        <!-- ❤️ 喜愛項目分頁 -->
+        <div id="tab-favorites" class="tab-content">
+            <div id="favorites-container">
+                <div class="cal-loading">載入中...</div>
+            </div>
+        </div>
     </div>
     <?php elseif (empty($all_capsules)): ?>
     <div class="section-card"><div style="text-align:center;padding:20px 0;color:var(--text-light);">📦 還沒有任何膠囊<br><a href="aboutyou_create_capsule.php" class="btn btn-primary btn-sm" style="margin-top:10px;">＋ 建立第一個膠囊</a></div></div>
@@ -1465,7 +1589,7 @@ mysqli_close($link);
 
 <!-- ===== 原有 Lightbox、Modal 等（完全保留） ===== -->
 <div class="lightbox" id="lightbox">
-    <div class="lightbox-top-bar"><button id="lightbox-delete-btn">🗑️ 刪除</button><button onclick="closeLightbox()">✕ 關閉</button></div>
+    <div class="lightbox-top-bar"><button id="lightbox-like-btn" title="標記喜愛">🤍</button><button id="lightbox-delete-btn">🗑️ 刪除</button><button onclick="closeLightbox()">✕ 關閉</button></div>
     <div class="lightbox-nav-area left" id="lightbox-prev" onclick="lightboxNavigate(-1)">◀</div>
     <div id="lightbox-content"></div>
     <div class="lightbox-nav-area right" id="lightbox-next" onclick="lightboxNavigate(1)">▶</div>
@@ -1480,6 +1604,7 @@ mysqli_close($link);
 // ===== 原有全域函數（Lightbox, 編輯, 留言, 分享, 上傳預覽等）完全保留 =====
 let lb={hash:null,items:[],idx:0,deleted:false};
 let currentDayFirstMemoryId = null;
+window.__capsuleId = <?php echo $selected_capsule_id ?: 0; ?>;
 window.currentDayMedia = [];
 function openLightbox(h,i){const d=window['mediaData_'+h];if(!d||!d.length)return;lb.hash=h;lb.items=[...d];lb.idx=Math.min(i,d.length-1);lb.deleted=false;document.getElementById('lightbox').classList.add('active');document.body.style.overflow='hidden';renderLb();}
 function closeLightbox() {
@@ -1568,7 +1693,16 @@ function renderLb() {
     p.style.display = lb.idx === 0 ? 'none' : 'flex';
     n.style.display = lb.idx >= lb.items.length - 1 ? 'none' : 'flex';
     db.style.display = (m.owner_id == <?php echo $user_id; ?>) ? 'inline-block' : 'none';
-
+    // ★ 更新愛心按鈕
+    const likeBtn = document.getElementById('lightbox-like-btn');
+    if (likeBtn) {
+        likeBtn.textContent = m.like_it ? '❤️' : '🤍';
+        likeBtn.classList.toggle('is-liked', !!m.like_it);
+        likeBtn.onclick = function (e) {
+            e.stopPropagation();
+            toggleLike(m.id);
+        };
+    }
     db.onclick = async function () {
         if (!confirm('確定要刪除嗎？')) return;
         const mid = lb.items[lb.idx].id;
@@ -1586,6 +1720,129 @@ function renderLb() {
         } catch (e) {}
     };
 }
+
+// ============================================================
+// ★ 喜愛項目：切換與狀態同步
+// ============================================================
+function syncLikeState(memoryId, newState) {
+    // 更新 lb.items
+    if (Array.isArray(lb.items)) {
+        lb.items.forEach(it => { if (it && it.id === memoryId) it.like_it = newState; });
+    }
+    // 更新所有 window.mediaData_xxx 與其他陣列
+    const arrays = [window.currentDayMedia, window.favoritesMediaData];
+    Object.keys(window).forEach(k => {
+        if (k.startsWith('mediaData_') && Array.isArray(window[k])) arrays.push(window[k]);
+    });
+    arrays.forEach(arr => {
+        if (!Array.isArray(arr)) return;
+        arr.forEach(it => { if (it && it.id === memoryId) it.like_it = newState; });
+    });
+}
+
+function toggleLike(memoryId) {
+    const m = (lb.items || []).find(it => it.id === memoryId);
+    if (!m) return;
+    const newState = m.like_it ? 0 : 1;
+    const btn = document.getElementById('lightbox-like-btn');
+    if (btn) btn.disabled = true;
+
+    fetch('aboutyou.php?ajax_action=toggle_like', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'X-Requested-With': 'XMLHttpRequest'
+        },
+        body: new URLSearchParams({ memory_id: memoryId, like: newState })
+    })
+    .then(r => r.json())
+    .then(res => {
+        if (!res.success) {
+            console.error('toggle_like failed:', res.error);
+            return;
+        }
+        syncLikeState(memoryId, res.like_it);
+        if (btn) {
+            btn.textContent = res.like_it ? '❤️' : '🤍';
+            btn.classList.toggle('is-liked', !!res.like_it);
+        }
+        // 若正在 ❤️ 分頁並取消標記 → 重新載入清單
+        if (lb.hash === 'favorites' && !res.like_it && typeof loadFavorites === 'function') {
+            setTimeout(loadFavorites, 250);
+        }
+    })
+    .catch(err => console.error('toggle_like error:', err))
+    .finally(() => { if (btn) btn.disabled = false; });
+}
+
+// ❤️ 分頁載入與 Lightbox
+function loadFavorites() {
+    const container = document.getElementById('favorites-container');
+    if (!container) return;
+    container.innerHTML = '<div class="cal-loading">載入中...</div>';
+
+    const capId = window.__capsuleId || 0;
+    if (!capId) { container.innerHTML = ''; return; }
+
+    fetch(`aboutyou.php?ajax_action=favorites_list&capsule_id=${capId}`, {
+        headers: { 'X-Requested-With': 'XMLHttpRequest' }
+    })
+    .then(r => r.json())
+    .then(res => {
+        if (!res.success || !res.items || !res.items.length) {
+            container.innerHTML = '<div style="text-align:center;padding:30px 0;color:var(--text-light);">💔 還沒有喜愛的項目</div>';
+            window.favoritesMediaData = [];
+            return;
+        }
+        const items = res.items.map(m => ({
+            id: m.id,
+            url: m.media_url,
+            thumb: m.thumbnail_url || null,
+            type: m.type,
+            owner_id: m.memory_owner_id,
+            like_it: 1
+        }));
+        window.favoritesMediaData = items;
+
+        let html = '<div class="media-grid" style="padding:0;">';
+        items.forEach((m, idx) => {
+            const isVideo = m.type === 'video' || /\.(mp4|webm|mov|avi|mkv|flv|wmv)$/i.test(m.url);
+            let inner;
+            if (isVideo) {
+                inner = m.thumb
+                    ? `<img src="${escAttr(m.thumb)}" alt="" loading="lazy"><span class="thumb-type-tag">🎥</span>`
+                    : `<video src="${escAttr(m.url)}" muted preload="metadata" playsinline webkit-playsinline></video><span class="thumb-type-tag">🎥</span>`;
+            } else {
+                inner = `<img src="${escAttr(m.url)}" alt="" loading="lazy"><span class="thumb-type-tag">📷</span>`;
+            }
+            html += `<div class="media-thumb" onclick="openFavLightbox(${idx})">${inner}</div>`;
+        });
+        html += '</div>';
+        container.innerHTML = html;
+    })
+    .catch(err => {
+        console.error('favorites_list error:', err);
+        container.innerHTML = '<div style="padding:20px;color:#c0392b;">載入失敗</div>';
+    });
+}
+
+function escAttr(s) {
+    if (!s) return '';
+    return String(s).replaceAll('&', '&amp;').replaceAll('"', '&quot;')
+                    .replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+}
+
+window.openFavLightbox = function (idx) {
+    if (!window.favoritesMediaData || !window.favoritesMediaData.length) return;
+    lb.hash = 'favorites';
+    lb.items = [...window.favoritesMediaData];
+    lb.idx = idx;
+    lb.deleted = false;
+    document.getElementById('lightbox').classList.add('active');
+    document.body.style.overflow = 'hidden';
+    renderLb();
+};
+
 // ============================================================
 // ★ Lightbox 手勢：雙指縮放 / 單指拖曳 / 左右滑動切圖
 // ============================================================
@@ -2009,6 +2266,9 @@ function appendEmojiToComment(inputId, emoji) {
                     renderCalendar(currentYear, currentMonth);
                 }
             }
+if (targetTab === 'favorites') {
+    loadFavorites();
+}
         });
     });
 
@@ -2217,7 +2477,7 @@ function appendEmojiToComment(inputId, emoji) {
                             const mediaIdx = window.currentDayMedia.length;
                             mediaHtml += `<div class="media-thumb" onclick="openCalLightbox(${mediaIdx})">${innerHtml}</div>`;
                             window.currentDayMedia.push({
-                                id: m.id, url: m.media_url, type: m.type, owner_id: m.user_id || 0
+                                id: m.id, url: m.media_url, type: m.type, owner_id: m.user_id || 0, like_it: m.like_it ? 1 : 0 
                             });
                         }
                         if (m.content_text && m.content_text.trim() !== '') {
@@ -2489,7 +2749,10 @@ function editMilestone(id, btn) {
                 });
                 observer.observe(document.getElementById('cal-grid'), { childList: true });
             }
-        }
+        } else if (savedTab === 'favorites') {
+    const favBtn = document.querySelector('.tab-btn[data-tab="favorites"]');
+    if (favBtn) favBtn.click();
+}
     });
     
 // ============================================================
