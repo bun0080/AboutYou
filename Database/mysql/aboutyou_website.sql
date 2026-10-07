@@ -60,6 +60,7 @@ CREATE TABLE `tbl_memory_comments` (
 CREATE TABLE `tbl_memory_shared` (
   `memory_id` int NOT NULL,
   `target_user_ids` text NOT NULL,
+  `like_it` TINYINT(1) NOT NULL DEFAULT 0 '喜愛標記：0=未標記, 1=已標記',
   PRIMARY KEY (`memory_id`),
   CONSTRAINT `tbl_memory_shared_ibfk_1` FOREIGN KEY (`memory_id`) REFERENCES `tbl_memories` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
